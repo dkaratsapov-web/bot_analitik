@@ -66,10 +66,47 @@ async def handle_text(message: Message):
         await message.answer(f"⚠️ Ошибка: {e}")
 
 
+def _start_sync_scheduler() -> "object | None":
+    """Запустить фоновую синхронизацию кэша метрик, если включён USE_CACHE.
+
+    APScheduler — тяжёлая зависимость, поэтому импортируется лениво и только
+    когда кэш реально используется. Без USE_CACHE бот работает как раньше,
+    напрямую через провайдера (мок/Директ), без планировщика."""
+    if not config.USE_CACHE:
+        return None
+
+    import data
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    provider = data.get_provider()
+    sync = getattr(provider, "sync", None)
+    if sync is None:
+        logging.warning("USE_CACHE=true, но провайдер без sync() — пропускаю планировщик.")
+        return None
+
+    def job():
+        try:
+            written = sync()
+            logging.info("Синхронизация кэша: обновлено строк — %s", written)
+        except Exception:
+            logging.exception("Ошибка фоновой синхронизации кэша")
+
+    job()  # первичная синхронизация на старте, чтобы база не была пустой
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(job, "interval", minutes=config.SYNC_INTERVAL_MINUTES)
+    scheduler.start()
+    logging.info(
+        "Планировщик синхронизации запущен (каждые %s мин).",
+        config.SYNC_INTERVAL_MINUTES,
+    )
+    return scheduler
+
+
 async def main():
     bot = Bot(token=config.TELEGRAM_TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
+    _start_sync_scheduler()
     logging.info("Бот запущен (polling).")
     await dp.start_polling(bot)
 

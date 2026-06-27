@@ -13,8 +13,11 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 
 import data
+import storage
 import tools
 
 
@@ -51,6 +54,9 @@ def main() -> int:
         elif "error" in result:
             failures.append(f"{name}: {result['error']}")
 
+    # Кэш-слой (SQLite): round-trip без сети, на временной базе.
+    failures.extend(_check_cache(project))
+
     print("\n" + "=" * 60)
     if failures:
         print("СМОУК-ТЕСТ ПРОВАЛЕН:")
@@ -59,6 +65,50 @@ def main() -> int:
         return 1
     print("СМОУК-ТЕСТ ПРОЙДЕН: все инструменты отработали без ошибок.")
     return 0
+
+
+def _check_cache(project: str) -> list[str]:
+    """Проверить SQLite-хранилище и CachedProvider без сети.
+
+    Используем временный файл базы, чтобы не трогать рабочую metrics.sqlite3
+    и не оставлять мусора. Базовый провайдер — MockProvider (детерминирован)."""
+    problems: list[str] = []
+    fd, path = tempfile.mkstemp(prefix="smoke_metrics_", suffix=".sqlite3")
+    os.close(fd)
+    try:
+        cached = data.CachedProvider(data.MockProvider(), path, sync_days=30)
+
+        # 1) Холодный кэш: get_rows должен лениво синхронизироваться и вернуть данные.
+        rows = cached.get_rows(project, days=14)
+        print(f"\n### CachedProvider.get_rows({project}, 14) -> {len(rows)} строк (cold)")
+        if len(rows) != 14:
+            problems.append(f"cache: ожидал 14 строк после промаха, получил {len(rows)}")
+        if rows and not all("cpa" in r for r in rows):
+            problems.append("cache: производные метрики (cpa) не посчитаны")
+
+        # 2) Явный sync по всем проектам наполняет базу.
+        written = cached.sync()
+        print(f"### CachedProvider.sync() -> обновлено {written} строк")
+        if written <= 0:
+            problems.append("cache: sync() не записал ни одной строки")
+
+        # 3) Прямое чтение из storage возвращает «сырые» строки.
+        with storage.open_db(path) as conn:
+            raw = storage.get_raw_rows(conn, project, 7)
+            cnt = storage.count_rows(conn, project)
+        print(f"### storage.get_raw_rows({project}, 7) -> {len(raw)} строк; всего {cnt}")
+        if len(raw) != 7:
+            problems.append(f"storage: ожидал 7 сырых строк, получил {len(raw)}")
+        if raw and set(raw[0]) != set(storage.RAW_FIELDS):
+            problems.append("storage: набор полей сырой строки не совпал с RAW_FIELDS")
+    except Exception as e:  # noqa: BLE001 — смоук-тест должен поймать любую поломку
+        problems.append(f"cache: исключение — {e!r}")
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return problems
 
 
 if __name__ == "__main__":

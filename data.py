@@ -114,10 +114,75 @@ class YandexDirectClient:
         raise NotImplementedError("Реализуйте через Reports API Директа")
 
 
+class CachedProvider:
+    """Кэширующая обёртка над любым провайдером (Mock или Yandex).
+
+    Читает дневные строки из локальной SQLite-базы, а при их отсутствии
+    лениво подтягивает данные из «настоящего» провайдера и сохраняет.
+    Регулярную фоновую синхронизацию запускает бот (см. bot.py), но даже
+    без него обёртка самодостаточна: промах кэша → синхронизация по запросу.
+
+    Конвенция №2 соблюдена: storage использует только стандартный sqlite3,
+    тяжёлых зависимостей здесь нет.
+    """
+
+    def __init__(self, base, db_path: str, sync_days: int = 30):
+        import storage  # локальный импорт, чтобы не тянуть его без нужды
+
+        self._storage = storage
+        self.base = base
+        self.db_path = db_path
+        self.sync_days = sync_days
+
+    def list_projects(self) -> list[str]:
+        return self.base.list_projects()
+
+    def sync(self, project: Optional[str] = None) -> int:
+        """Синхронизировать кэш из базового провайдера. Возвращает число
+        обновлённых строк. Если project не задан — синхронизирует все."""
+        projects = [project] if project else self.base.list_projects()
+        written = 0
+        now = date.today().isoformat()
+        with self._storage.open_db(self.db_path) as conn:
+            for p in projects:
+                rows = self.base.get_rows(p, self.sync_days)
+                if not rows:
+                    continue
+                written += self._storage.upsert_rows(conn, p, rows)
+                self._storage.mark_synced(conn, p, now)
+        return written
+
+    def get_rows(self, project: str, days: int = 14) -> list[dict]:
+        if project not in self.base.list_projects():
+            return []
+        with self._storage.open_db(self.db_path) as conn:
+            if self._storage.count_rows(conn, project) < days:
+                # промах/неполный кэш — подтянуть из базового провайдера
+                rows = self.base.get_rows(project, max(days, self.sync_days))
+                if rows:
+                    self._storage.upsert_rows(conn, project, rows)
+                    self._storage.mark_synced(conn, project, date.today().isoformat())
+            raw = self._storage.get_raw_rows(conn, project, days)
+        return _with_derived(raw)
+
+
 def get_provider():
     """Единая точка получения источника данных.
-    Поменяйте здесь на YandexDirectClient(token), когда будет токен."""
-    return MockProvider()
+
+    По умолчанию — MockProvider (запуск без доступов к API). При
+    config.USE_CACHE=true оборачивает провайдера в CachedProvider поверх
+    SQLite. Когда появится токен Директа — поменяйте базовый провайдер на
+    YandexDirectClient(token), кэш продолжит работать поверх него."""
+    base = MockProvider()
+    try:
+        import config
+
+        if getattr(config, "USE_CACHE", False):
+            return CachedProvider(base, config.DB_PATH, config.SYNC_DAYS)
+    except Exception:
+        # config недоступен (например, в изолированном тесте) — отдаём мок
+        pass
+    return base
 
 
 # --- Утилиты агрегации (используются инструментами агента) -------------------

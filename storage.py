@@ -54,6 +54,15 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # Подписки чатов на проактивные алерты (Приоритет 3).
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS alert_subs (
+            chat_id     INTEGER PRIMARY KEY,
+            created_at  TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
 
 
@@ -134,6 +143,34 @@ def known_projects(conn: sqlite3.Connection) -> list[str]:
     """Проекты, по которым в базе есть хоть какие-то данные."""
     cur = conn.execute("SELECT DISTINCT project FROM metrics ORDER BY project")
     return [r[0] for r in cur.fetchall()]
+
+
+# --- Подписки на проактивные алерты -----------------------------------------
+def add_subscriber(conn: sqlite3.Connection, chat_id: int, created_at: str) -> bool:
+    """Подписать чат на алерты. True — если подписка новая."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO alert_subs (chat_id, created_at) VALUES (?, ?)",
+        (chat_id, created_at),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def remove_subscriber(conn: sqlite3.Connection, chat_id: int) -> bool:
+    """Отписать чат. True — если подписка была."""
+    cur = conn.execute("DELETE FROM alert_subs WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def list_subscribers(conn: sqlite3.Connection) -> list[int]:
+    cur = conn.execute("SELECT chat_id FROM alert_subs ORDER BY chat_id")
+    return [int(r[0]) for r in cur.fetchall()]
+
+
+def is_subscribed(conn: sqlite3.Connection, chat_id: int) -> bool:
+    cur = conn.execute("SELECT 1 FROM alert_subs WHERE chat_id = ?", (chat_id,))
+    return cur.fetchone() is not None
 
 
 # Удобный контекст-менеджер для разовых операций.

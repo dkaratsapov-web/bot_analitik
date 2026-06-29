@@ -36,3 +36,15 @@ SYNC_DAYS = int(os.getenv("SYNC_DAYS", "30"))
 
 # Период фоновой синхронизации в минутах (используется ботом).
 SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "60"))
+
+
+# --- Проактивные алерты по аномалиям (Приоритет 3 из SPEC.md) ---------------
+# По умолчанию ВЫКЛЮЧЕНЫ. Включите ALERTS_ENABLED=true, подпишите чат
+# командой /alerts_on, и бот будет ежедневно слать сводку аномалий.
+ALERTS_ENABLED = _as_bool(os.getenv("ALERTS_ENABLED", "false"))
+
+# Час ежедневной рассылки (0–23, локальное время сервера).
+ALERTS_HOUR = int(os.getenv("ALERTS_HOUR", "9"))
+
+# Порог z-оценки для срабатывания алерта (чем меньше — тем чувствительнее).
+ALERT_ZSCORE = float(os.getenv("ALERT_ZSCORE", "2.0"))

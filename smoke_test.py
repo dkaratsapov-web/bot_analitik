@@ -16,6 +16,7 @@ import json
 import os
 import tempfile
 
+import alerts
 import data
 import storage
 import tools
@@ -56,6 +57,9 @@ def main() -> int:
 
     # Кэш-слой (SQLite): round-trip без сети, на временной базе.
     failures.extend(_check_cache(project))
+
+    # Алерты по аномалиям + подписки: без сети, на временной базе.
+    failures.extend(_check_alerts(project))
 
     print("\n" + "=" * 60)
     if failures:
@@ -103,6 +107,57 @@ def _check_cache(project: str) -> list[str]:
             problems.append("storage: набор полей сырой строки не совпал с RAW_FIELDS")
     except Exception as e:  # noqa: BLE001 — смоук-тест должен поймать любую поломку
         problems.append(f"cache: исключение — {e!r}")
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return problems
+
+
+def _check_alerts(project: str) -> list[str]:
+    """Проверить логику алертов и хранилище подписок без сети."""
+    problems: list[str] = []
+    provider = data.MockProvider()
+
+    # 1) scan возвращает список (на моке аномалий может и не быть — это норма).
+    found = alerts.scan(provider, z=2.0)
+    print(f"\n### alerts.scan(z=2.0) -> {len(found)} аномалий")
+    if not isinstance(found, list):
+        problems.append(f"alerts: scan вернул не list ({type(found).__name__})")
+
+    # 2) format_report: пусто при пустом входе, текст — при синтетическом алерте.
+    if alerts.format_report([]) != "":
+        problems.append("alerts: format_report([]) должен быть пустой строкой")
+    synthetic = [{
+        "project": project, "metric": "cost", "date": "2026-06-29",
+        "value": 99999.0, "mean": 50000.0, "z": 3.4,
+        "title": "Расход подскочил", "unit": "₽",
+    }]
+    report = alerts.format_report(synthetic)
+    print("### alerts.format_report(synthetic):")
+    print(report)
+    if project not in report or "Расход подскочил" not in report:
+        problems.append("alerts: отчёт не содержит ожидаемого текста")
+
+    # 3) Подписки: add / list / is_subscribed / remove на временной базе.
+    fd, path = tempfile.mkstemp(prefix="smoke_subs_", suffix=".sqlite3")
+    os.close(fd)
+    try:
+        with storage.open_db(path) as conn:
+            added = storage.add_subscriber(conn, 12345, "2026-06-29T09:00:00")
+            again = storage.add_subscriber(conn, 12345, "2026-06-29T09:00:00")
+            subs = storage.list_subscribers(conn)
+            subscribed = storage.is_subscribed(conn, 12345)
+            removed = storage.remove_subscriber(conn, 12345)
+            empty = storage.list_subscribers(conn)
+        print(f"### subs: added={added} again={again} list={subs} "
+              f"is_sub={subscribed} removed={removed} after={empty}")
+        if not (added and not again and subs == [12345] and subscribed
+                and removed and empty == []):
+            problems.append("alerts: жизненный цикл подписки отработал неверно")
+    except Exception as e:  # noqa: BLE001
+        problems.append(f"alerts: исключение в подписках — {e!r}")
     finally:
         try:
             os.remove(path)
